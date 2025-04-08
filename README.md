@@ -1,1 +1,1 @@
-# hyperbolic-graph-retrieval
+# Neural Kernel Learning for Scalable Graph Retrieval 
