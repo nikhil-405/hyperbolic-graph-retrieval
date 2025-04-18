@@ -174,7 +174,7 @@ def project(x, *, k, dim=-1):
     return _project(x, k=k, dim=dim)
 
 
-@torch.jit.script
+@torch.jit.script #converts code to a more optimized and platform independent version. compiled by JIT ahead of time
 def _project(x, k: torch.Tensor, dim: int = -1):
     dn = x.size(dim) - 1
     right_ = x.narrow(dim, 1, dn)

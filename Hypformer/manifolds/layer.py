@@ -6,7 +6,7 @@ from geoopt.optim.rsgd import RiemannianSGD
 from geoopt.optim.radam import RiemannianAdam
 import math
 
-
+# only operates on the spatial components
 class HypLayerNorm(nn.Module):
     """
     Hyperbolic Layer Normalization Layer
@@ -33,6 +33,7 @@ class HypLayerNorm(nn.Module):
         """Forward pass for hyperbolic layer normalization."""
         x_space = x[..., 1:]
         x_space = self.layer(x_space)
+        # the temporal component is modified 
         x_time = ((x_space ** 2).sum(dim=-1, keepdims=True) + self.manifold.k).sqrt()
         x = torch.cat([x_time, x_space], dim=-1)
 
@@ -40,7 +41,7 @@ class HypLayerNorm(nn.Module):
             x = x * (self.manifold_out.k / self.manifold.k).sqrt()
         return x
 
-
+# only normalizes the spatial components
 class HypNormalization(nn.Module):
     """
     Hyperbolic Normalization Layer
@@ -150,11 +151,14 @@ class HypLinear(nn.Module):
         """Reset layer parameters."""
         init.xavier_uniform_(self.linear.weight, gain=math.sqrt(2))
         if self.bias:
-            init.constant_(self.linear.bias, 0)
+            # init.constant_(self.linear.bias, 0)
+            # the biases are now learnable as well
+            init.xavier_uniform(self.bias, gain = math.sqrt(2))
 
     def forward(self, x, x_manifold='hyp'):
         """Forward pass for hyperbolic linear layer."""
         if x_manifold != 'hyp':
+            # adding an additional dimension to x (time-like)
             x = torch.cat([torch.ones_like(x)[..., 0:1], x], dim=-1)
             x = self.manifold.expmap0(x)
         x_space = self.linear(x)
@@ -209,6 +213,7 @@ class HypCLS(nn.Module):
         else:
             raise NotImplementedError
 
+# Optimizes Euclidean as well as Hyperbolic parameters(considered to be an instance of Manifold parameter class)
 class Optimizer(object):
     """
     Optimizer for Euclidean and Hyperbolic parameters

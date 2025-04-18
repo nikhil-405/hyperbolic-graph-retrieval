@@ -18,12 +18,13 @@ class HypLayerNorm(nn.Module):
         self.manifold = manifold
         self.manifold_out = manifold_out
         self.layer = nn.LayerNorm(self.in_features)
-        self.reset_parameters()
+        self.reset_parameters() # inplace modification of the weights
 
     def reset_parameters(self):
         self.layer.reset_parameters()
 
     def forward(self, x):
+        # x -> the first entry is the temporal dimension and entries after that compose the spatial features
         x_space = x[..., 1:]
         x_space = self.layer(x_space)
         x_time = ((x_space**2).sum(dim=-1, keepdims=True) + self.manifold.k).sqrt()
@@ -104,7 +105,9 @@ class HypLinear(nn.Module):
 
     def reset_parameters(self):
         init.xavier_uniform_(self.linear.weight, gain=math.sqrt(2))
-        init.constant_(self.linear.bias, 0)
+        # init.constant_(self.linear.bias, 0)
+        # the biases are now learnable as well
+        init.xavier_uniform(self.bias, gain = math.sqrt(2))
 
     def forward(self, x, x_manifold='hyp'):
         if x_manifold != 'hyp':

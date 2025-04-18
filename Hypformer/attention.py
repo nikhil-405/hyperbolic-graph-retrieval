@@ -9,6 +9,8 @@ from manifolds.layer import HypLinear, HypLayerNorm, HypActivation, HypDropout, 
 from manifolds.lorentz import Lorentz
 from geoopt import ManifoldParameter
 
+# class 
+
 class TransConvLayer(nn.Module):
     def __init__(self, manifold, in_channels, out_channels, num_heads, use_weight=True, args=None):
         super().__init__()
@@ -19,17 +21,20 @@ class TransConvLayer(nn.Module):
         self.use_weight = use_weight
         self.attention_type = args.attention_type
 
+        # ModuleList is used to hold submodules in a list, can be indexed simply like a list
         self.Wk = nn.ModuleList()
         self.Wq = nn.ModuleList()
         for i in range(self.num_heads):
             self.Wk.append(HypLinear(self.manifold, self.in_channels, self.out_channels))
             self.Wq.append(HypLinear(self.manifold, self.in_channels, self.out_channels))
 
+        # value matrix
         if use_weight:
             self.Wv = nn.ModuleList()
             for i in range(self.num_heads):
                 self.Wv.append(HypLinear(self.manifold, in_channels, out_channels))
 
+        # you can optionally make this parameters learnable, simply set requires_grad = True
         self.scale = nn.Parameter(torch.tensor([math.sqrt(out_channels)]))
         self.bias = nn.Parameter(torch.zeros(()))
         self.norm_scale = nn.Parameter(torch.ones(()))
@@ -172,13 +177,7 @@ class TransConv(nn.Module):
         self.fcs = nn.ModuleList()
         self.bns = nn.ModuleList()
 
-        extra_hyp_linears = getattr(args, "extra_hyp_linears", 0)
-
         self.fcs.append(HypLinear(self.manifold_in, self.in_channels, self.hidden_channels, self.manifold_hidden))
-
-        for _ in range(extra_hyp_linears):
-            self.fcs.append(
-                HypLinear(self.manifold_hidden, self.hidden_channels, self.hidden_channels, self.manifold_hidden))
         self.bns.append(HypLayerNorm(self.manifold_hidden, self.hidden_channels))
 
         self.add_pos_enc = args.add_positional_encoding
@@ -199,18 +198,8 @@ class TransConv(nn.Module):
         layer_ = []
 
         # the original inputs are in Euclidean
-        # x = self.fcs[0](x_input, x_manifold='euc')
         x = self.fcs[0](x_input, x_manifold='euc')
-        for f in self.fcs[1:-1]:  # skip last (output projection)
-            x = f(x)  # input is already on manifold
-            if self.use_bn:
-                x = self.bns[0](x)  # or optionally add more norms
-            if self.use_act:
-                x = self.activation(x)
-            x = self.dropout(x, training=self.training)
-
         # add positional embedding
-
         if self.add_pos_enc:
             x_pos = self.positional_encoding(x_input, x_manifold='euc')
             x = self.manifold_hidden.mid_point(torch.stack((x, self.epsilon*x_pos), dim=1))
@@ -252,73 +241,3 @@ class TransConv(nn.Module):
                 x = self.bns[i + 1](x)
             layer_.append(x)
         return torch.stack(attentions, dim=0)  # [layer num, N, N]
-
-class HypFormer(nn.Module):
-    
-    def __init__(self, in_channels, hidden_channels, out_channels,
-                 trans_num_layers=1, trans_num_heads=1, trans_dropout=0.5, trans_use_bn=True, trans_use_residual=True,
-                 trans_use_weight=True, trans_use_act=True,
-                 args=None):
-        """
-        Initializes a HypFormer object.
-
-        Args:
-            in_channels (int): The number of input channels.
-            hidden_channels (int): The number of hidden channels.
-            out_channels (int): The number of output channels.
-            trans_num_layers (int, optional): The number of layers in the TransConv module. Defaults to 1.
-            trans_num_heads (int, optional): The number of attention heads in the TransConv module. Defaults to 1.
-            trans_dropout (float, optional): The dropout rate in the TransConv module. Defaults to 0.5.
-            trans_use_bn (bool, optional): Whether to use batch normalization in the TransConv module. Defaults to True.
-            trans_use_residual (bool, optional): Whether to use residual connections in the TransConv module. Defaults to True.
-            trans_use_weight (bool, optional): Whether to use learnable weights in the TransConv module. Defaults to True.
-            trans_use_act (bool, optional): Whether to use activation functions in the TransConv module. Defaults to True.
-            args (optional): Additional arguments.
-
-        Raises:
-            NotImplementedError: If the decoder_type is not 'euc' or 'hyp'.
-
-        """
-        super().__init__()
-        self.manifold_in = Lorentz(k=float(args.k_in))
-        # self.manifold_hidden = Lorentz(k=float(args.k_in))
-        self.manifold_hidden = Lorentz(k=float(args.k_out))
-        self.decoder_type = args.decoder_type
-
-        self.manifold_out = Lorentz(k=float(args.k_out))
-        self.in_channels = in_channels
-        self.hidden_channels = hidden_channels
-        self.out_channels = out_channels
-
-        self.trans_conv = TransConv(self.manifold_in, self.manifold_hidden, self.manifold_out, in_channels, hidden_channels, trans_num_layers, trans_num_heads, trans_dropout, trans_use_bn, trans_use_residual, trans_use_weight, trans_use_act, args)
-
-        # self.aggregate = aggregate
-
-        if self.decoder_type == 'euc':
-            self.decode_trans = nn.Linear(self.hidden_channels, self.out_channels)
-            self.decode_graph = nn.Linear(self.hidden_channels, self.out_channels)
-        elif self.decoder_type == 'hyp':
-            self.decode_graph = HypLinear(self.manifold_out, self.hidden_channels, self.hidden_channels)
-            self.decode_trans = HypCLS(self.manifold_out, self.hidden_channels, self.out_channels)
-        else:
-            raise NotImplementedError
-
-    def forward(self, x):
-        # print("x",x.shape)
-        x1 = self.trans_conv(x)
-        # print("x1",x1.shape)
-        if self.decoder_type == 'euc':
-            x = self.decode_trans(self.manifold_out.logmap0(x1)[..., 1:])
-        elif self.decoder_type == 'hyp':
-            x = self.decode_trans(x1)
-        else:
-            raise NotImplementedError
-        return x
-
-    def get_attentions(self, x):
-        attns = self.trans_conv.get_attentions(x)  # [layer num, N, N]
-        return attns
-
-    def reset_parameters(self):
-        if self.use_graph:
-            self.graph_conv.reset_parameters()
