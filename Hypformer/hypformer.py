@@ -151,13 +151,13 @@ class TransConvLayer(nn.Module):
 
 
 class TransConv(nn.Module):
-    def __init__(self, manifold_in, manifold_hidden, manifold_out, in_channels, hidden_channels, num_layers=2, num_heads=1,
-                 dropout=0.5, use_bn=True, use_residual=True, use_weight=True, use_act=True, args=None):
+    def __init__(self, manifold_in, manifold_hidden, manifold_out, in_channels, hidden_channels,extra_dims, num_layers=2, num_heads=1,
+                 dropout=0.5, use_bn=False, use_residual=False, use_weight=True, use_act=True, args=None):
         super().__init__()
         self.manifold_in = manifold_in
         self.manifold_hidden = manifold_hidden
         self.manifold_out = manifold_out
-        
+
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
         self.num_layers = num_layers
@@ -171,18 +171,61 @@ class TransConv(nn.Module):
         self.convs = nn.ModuleList()
         self.fcs = nn.ModuleList()
         self.bns = nn.ModuleList()
+        self.fc_bns=nn.ModuleList()
+        self.conv_bns = nn.ModuleList()
+        self.extra_dims=extra_dims
 
-        extra_hyp_linears = getattr(args, "extra_hyp_linears", 0)
 
-        self.fcs.append(HypLinear(self.manifold_in, self.in_channels, self.hidden_channels, self.manifold_hidden))
+        # extra_hyp_linears = getattr(args, "extra_hyp_linears", 0)
+        #
+        # self.fcs.append(HypLinear(self.manifold_in, self.in_channels, self.hidden_channels, self.manifold_hidden))
+        #
+        # for _ in range(extra_hyp_linears):
+        #     self.fcs.append(
+        #         HypLinear(self.manifold_hidden, self.hidden_channels, self.hidden_channels, self.manifold_hidden))
+        # self.bns.append(HypLayerNorm(self.manifold_hidden, self.hidden_channels))
+        #
+        # self.add_pos_enc = args.add_positional_encoding
+        # self.positional_encoding = HypLinear(self.manifold_in, self.in_channels, self.hidden_channels, self.manifold_hidden)
+        # self.epsilon = torch.tensor([1.0], device=args.device)
 
-        for _ in range(extra_hyp_linears):
-            self.fcs.append(
-                HypLinear(self.manifold_hidden, self.hidden_channels, self.hidden_channels, self.manifold_hidden))
-        self.bns.append(HypLayerNorm(self.manifold_hidden, self.hidden_channels))
+        # extra_dims = getattr(args, "extra_hyp_linear_dims", None)
+        if extra_dims is not None and len(extra_dims) > 0:
+            dims = extra_dims
+            prev_dim = self.in_channels
+            
+            for idx, dim in enumerate(dims):
+                manifold = self.manifold_in if idx == 0 else self.manifold_hidden
+                self.fcs.append(HypLinear(manifold, prev_dim, dim, self.manifold_hidden))
+                prev_dim = dim
+            # final map to hidden_channels
+            self.fcs.append(HypLinear(self.manifold_hidden, prev_dim, self.hidden_channels, self.manifold_hidden))
+            dims_for_norm = dims + [self.hidden_channels]
+        else:
+            # single mapping
+            self.fcs.append(HypLinear(self.manifold_in, self.in_channels, self.hidden_channels, self.manifold_hidden))
+            dims_for_norm = [self.hidden_channels]
 
+        # Norm layers for extrahyplinear outputs
+        self.num_fcs_norms = len(dims_for_norm)
+        for dim in dims_for_norm:
+            self.bns.append(HypLayerNorm(self.manifold_hidden, dim))
+
+        # Initialize normalization layers for FC paths
+        for dim in dims_for_norm:
+            self.fc_bns.append(HypLayerNorm(self.manifold_hidden, dim))
+
+        # Initialize normalization layers for Conv paths
+        for i in range(self.num_layers):
+            self.convs.append(
+                TransConvLayer(self.manifold_hidden, self.hidden_channels, self.hidden_channels,
+                               num_heads=self.num_heads, use_weight=self.use_weight, args=args))
+            self.conv_bns.append(HypLayerNorm(self.manifold_hidden, self.hidden_channels))
+
+        # Positional encoding
         self.add_pos_enc = args.add_positional_encoding
-        self.positional_encoding = HypLinear(self.manifold_in, self.in_channels, self.hidden_channels, self.manifold_hidden)
+        self.positional_encoding = HypLinear(self.manifold_in, self.in_channels, self.hidden_channels,
+                                             self.manifold_hidden)
         self.epsilon = torch.tensor([1.0], device=args.device)
 
         for i in range(self.num_layers):
@@ -200,37 +243,65 @@ class TransConv(nn.Module):
 
         # the original inputs are in Euclidean
         # x = self.fcs[0](x_input, x_manifold='euc')
+        # x = self.fcs[0](x_input, x_manifold='euc')
+        # x=self.bns[0](x)
+        # i=1
+        # for f in self.fcs[1:]:  # skip last (output projection)
+        #     x = f(x)  # input is already on manifold
+        #     if self.use_bn:
+        #         x = self.bns[i](x)  # or optionally add more norms
+        #     if self.use_act:
+        #         x = self.activation(x)
+        #     x = self.dropout(x, training=self.training)
+        #     i+=1
+
         x = self.fcs[0](x_input, x_manifold='euc')
-        for f in self.fcs[1:-1]:  # skip last (output projection)
-            x = f(x)  # input is already on manifold
+        x = self.fc_bns[0](x)
+        i = 1
+        for f in self.fcs[1:-1]:
+            x = f(x)
             if self.use_bn:
-                x = self.bns[0](x)  # or optionally add more norms
+                x = self.fc_bns[i](x)
             if self.use_act:
                 x = self.activation(x)
             x = self.dropout(x, training=self.training)
+            i+=1
+
+        # print(x.shape)
 
         # add positional embedding
-
         if self.add_pos_enc:
             x_pos = self.positional_encoding(x_input, x_manifold='euc')
             x = self.manifold_hidden.mid_point(torch.stack((x, self.epsilon*x_pos), dim=1))
-
-        if self.use_bn:
-            x = self.bns[0](x)
-        if self.use_act:
-            x = self.activation(x)
-        x = self.dropout(x, training=self.training)
+        # print(x.shape)
+        # if self.use_bn:
+        #     x = self.bns[0](x)
+        # if self.use_act:
+        #     x = self.activation(x)
+        # x = self.dropout(x, training=self.training)
         layer_.append(x)
 
         for i, conv in enumerate(self.convs):
             x = conv(x, x)
             if self.residual:
                 x = self.manifold_hidden.mid_point(torch.stack((x, layer_[i]), dim=1))
-            if self.use_bn:
-                x = self.bns[i + 1](x)
+            # if self.use_bn:
+            #     x = self.bns[i](x)
             # if self.use_act:
             #     x = self.activation(x)
             # # x = self.dropout(x, training=self.training)
+            layer_.append(x)
+
+        for i, conv in enumerate(self.convs):
+            x = conv(x, x)
+            if self.residual:
+                x = self.manifold_hidden.mid_point(torch.stack((x, layer_[i]), dim=1))
+            # if self.use_bn:
+            #     bn_index = i + self.num_fcs_norms  # Correct index accounting for FC norms
+            #     # x = self.bns[bn_index](x)
+            if self.use_act:
+                x = self.activation(x)
+            x = self.dropout(x, training=self.training)
             layer_.append(x)
 
         x = self.fcs[-1](x)
@@ -255,7 +326,7 @@ class TransConv(nn.Module):
 
 class HypFormer(nn.Module):
     
-    def __init__(self, in_channels, hidden_channels, out_channels,
+    def __init__(self, in_channels, hidden_channels,extra_dims, out_channels,
                  trans_num_layers=1, trans_num_heads=1, trans_dropout=0.5, trans_use_bn=True, trans_use_residual=True,
                  trans_use_weight=True, trans_use_act=True,
                  args=None):
@@ -288,9 +359,11 @@ class HypFormer(nn.Module):
         self.manifold_out = Lorentz(k=float(args.k_out))
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
+        self.extra_dims=extra_dims
+
         self.out_channels = out_channels
 
-        self.trans_conv = TransConv(self.manifold_in, self.manifold_hidden, self.manifold_out, in_channels, hidden_channels, trans_num_layers, trans_num_heads, trans_dropout, trans_use_bn, trans_use_residual, trans_use_weight, trans_use_act, args)
+        self.trans_conv = TransConv(self.manifold_in, self.manifold_hidden, self.manifold_out, in_channels, hidden_channels,extra_dims, trans_num_layers, trans_num_heads, trans_dropout, trans_use_bn, trans_use_residual, trans_use_weight, trans_use_act, args)
 
         # self.aggregate = aggregate
 
